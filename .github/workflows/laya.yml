@@ -1,0 +1,51 @@
+name: laya-test
+on: [push, workflow_dispatch]
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: install
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install laya
+      - name: run
+        run: |
+          cat > t.py <<'PY'
+          import time, platform
+          from laya import Router
+          print("platform:", platform.platform(), platform.machine(), flush=True)
+          msgs = [
+            "Hi, I ordered the red dress 3 days ago and it still has not arrived. I want my money back today or I will dispute the payment.",
+            "how much is the blue sneakers size 42? do you deliver to Kumasi",
+            "The phone you sent has a cracked screen. This is the second time. I am very angry, call me now.",
+            "Thanks, received my order, all good. Will order again next week",
+            "Please can I change the delivery address to Tamale before it ships",
+          ]
+          qs = {
+            "intent": {"type": "choice", "instructions": "What does the customer want?",
+              "criteria": {"order_status": "asking where an order is or delivery changes",
+                           "refund_request": "wants money back, return or dispute",
+                           "product_inquiry": "asking about price, size, availability, delivery",
+                           "complaint": "reports a damaged or wrong item",
+                           "thanks": "positive feedback, no action needed"}},
+            "refund": {"type": "noul", "instructions": "Is the customer asking for a refund or money back?"},
+            "urgency": {"type": "score", "instructions": "How urgent is this?", "criteria": ["not urgent", "soon", "blocking"]},
+            "escalate": {"type": "noul", "instructions": "Should a human seller take over this chat now?"},
+          }
+          for model in ["english", "typed-decisions"]:
+            t = time.time()
+            r = Router()
+            r.predict(msgs[0], qs, model=model)
+            print("\n=== checkpoint:", model, "load+first call %.1fs" % (time.time()-t), flush=True)
+            for m in msgs:
+              t = time.time()
+              res = r.predict(m, qs, model=model)
+              a = res["answers"]
+              print("MSG:", m)
+              print("  intent=%s  refund_p=%.2f  urgency=%.2f  escalate_p=%.2f  (%.0f ms)" % (
+                a["intent"]["choice"], a["refund"]["noul"], a["urgency"]["score"], a["escalate"]["noul"], (time.time()-t)*1000), flush=True)
+          PY
+          USE_TF=0 python t.py
