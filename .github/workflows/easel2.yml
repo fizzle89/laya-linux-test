@@ -1,0 +1,40 @@
+name: easel-retry
+on: workflow_dispatch
+jobs:
+  easel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Easel with OpenClaw against local Ollama qwen2.5:3b (no paid key, no publishing)
+        continue-on-error: true
+        run: |
+          node --version
+          curl -fsSL https://ollama.com/install.sh | sh > /dev/null 2>&1
+          (ollama serve > ollama.log 2>&1 &) ; sleep 5
+          ollama pull qwen2.5:3b 2>&1 | tail -1
+          npm i -g openclaw 2>&1 | tail -3
+          openclaw --version || true
+          git clone --depth 1 https://github.com/ZJU-REAL/Easel.git
+          cd Easel
+          sudo apt-get install -y ffmpeg > /dev/null
+          cat > .env <<'ENV'
+          OPENAI_API_KEY=ollama
+          OPENAI_BASE_URL=http://localhost:11434/v1
+          OPENAI_MODEL=qwen2.5:3b
+          EASEL_EMBEDDING_API_KEY=ollama
+          EASEL_EMBEDDING_BASE_URL=http://localhost:11434/v1
+          EASEL_EMBEDDING_MODEL=qwen2.5:3b
+          ENV
+          bash setup.sh < /dev/null 2>&1 | tail -40
+          . .venv/bin/activate
+          easel doctor 2>&1 | tail -22
+          easel gateway start 2>&1 | tail -5 || true
+          sleep 10
+          timeout 120 easel ping 2>&1 | tail -10 || true
+          timeout 400 easel skill quality-gate -i "Check this draft before publishing: Our WhatsApp sales assistant is the best in the world and guarantees 10x revenue." 2>&1 | tail -30
