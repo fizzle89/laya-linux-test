@@ -1,0 +1,104 @@
+name: tools-test-2
+on: workflow_dispatch
+jobs:
+  whisper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: faster-whisper plus ffmpeg on a generated clip
+        run: |
+          sudo apt-get install -y espeak-ng ffmpeg > /dev/null
+          pip install -q faster-whisper "av>=13"
+          pip list 2>/dev/null | grep -iE "^(av|faster-whisper) "
+          espeak-ng -w clip.wav "Welcome to Pillar. We help sellers on WhatsApp answer every customer fast. The refund request was approved today."
+          ffmpeg -loglevel error -i clip.wav -ar 16000 -ac 1 clip16.wav
+          ffprobe -hide_banner clip16.wav 2>&1 | grep Duration
+          python - <<'PY'
+          import time
+          from faster_whisper import WhisperModel
+          t=time.time()
+          m=WhisperModel("small", device="cpu", compute_type="int8")
+          segs,info=m.transcribe("clip16.wav")
+          print("TRANSCRIPT:", " ".join(s.text.strip() for s in segs))
+          print("lang", info.language, "seconds %.1f" % (time.time()-t))
+          PY
+  engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Jev-style decision engine with an open 1.5B model (Qwen2.5-1.5B-Instruct), answer probabilities from token logits
+        run: |
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q transformers accelerate
+          python - <<'PY'
+          import torch, time
+          from transformers import AutoTokenizer, AutoModelForCausalLM
+          name="Qwen/Qwen2.5-1.5B-Instruct"
+          tok=AutoTokenizer.from_pretrained(name); m=AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float32); m.eval()
+          def decide(text, question, options):
+              letters="ABCDEFG"[:len(options)]
+              opts="\n".join(f"{l}. {o}" for l,o in zip(letters,options))
+              msgs=[{"role":"system","content":"You are a decision engine. Answer with one letter only."},
+                    {"role":"user","content":f"Message: {text}\n\nQuestion: {question}\n{opts}\nAnswer:"}]
+              p=tok.apply_chat_template(msgs,tokenize=False,add_generation_prompt=True)
+              ids=tok(p,return_tensors="pt")
+              with torch.no_grad(): lg=m(**ids).logits[0,-1]
+              tid=[tok.encode(l,add_special_tokens=False)[0] for l in letters]
+              pr=torch.softmax(lg[tid],0).tolist()
+              return {o:round(x,2) for o,x in zip(options,pr)}
+          msgs=["I want my money back today or I will dispute the payment.","how much is the blue sneakers size 42?","Phone arrived with a cracked screen, second time, call me now","Thanks, received my order, all good"]
+          t=time.time()
+          for x in msgs:
+              print("MSG:",x)
+              print("  intent:",decide(x,"What does the customer want?",["refund","product question","complaint","thanks"]))
+              print("  escalate to human:",decide(x,"Should a human take over now?",["yes","no"]))
+          print("total seconds %.1f" % (time.time()-t))
+          PY
+  openshorts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: build and start OpenShorts (self-hosted, docker compose)
+        run: |
+          git clone --depth 1 https://github.com/mutonby/openshorts.git
+          cd openshorts
+          cp .env.example .env || true
+          free -m | sed -n 2p
+          docker compose up --build -d 2>&1 | tail -15
+          for i in $(seq 1 30); do curl -s -o /dev/null -w "frontend %{http_code}\n" localhost:5175 && break; sleep 5; done
+          curl -s -o /dev/null -w "backend /docs %{http_code}\n" localhost:8000/docs || true
+          docker compose ps
+          docker compose logs --tail 15 2>&1 | cut -c1-200
+          free -m | sed -n 2p
+  easel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Easel against a free local Ollama model (qwen2.5:3b), no publishing, no paid key
+        continue-on-error: true
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh > /dev/null 2>&1
+          (ollama serve > ollama.log 2>&1 &) ; sleep 5
+          ollama pull qwen2.5:3b 2>&1 | tail -1
+          git clone --depth 1 https://github.com/ZJU-REAL/Easel.git
+          cd Easel
+          sudo apt-get install -y ffmpeg > /dev/null
+          python -m venv .venv && . .venv/bin/activate
+          pip install -q -e . 2>&1 | tail -3
+          python -m playwright install --with-deps chromium 2>&1 | tail -2
+          cat > .env <<'ENV'
+          OPENAI_API_KEY=ollama
+          OPENAI_BASE_URL=http://localhost:11434/v1
+          OPENAI_MODEL=qwen2.5:3b
+          ENV
+          easel doctor 2>&1 | tail -25
+          timeout 240 easel skill quality-gate -i "Check this draft before publishing: Our WhatsApp sales assistant is the best in the world and guarantees 10x revenue." 2>&1 | tail -30
