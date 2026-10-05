@@ -1,0 +1,35 @@
+name: tools-test
+on: workflow_dispatch
+jobs:
+  whisper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: faster-whisper on a generated clip
+        run: |
+          sudo apt-get install -y espeak-ng ffmpeg > /dev/null
+          pip install -q faster-whisper
+          espeak-ng -w clip.wav "Welcome to Pillar. We help sellers on WhatsApp answer every customer fast. The refund request was approved today."
+          ffprobe -hide_banner clip.wav 2>&1 | grep Duration
+          free -m | sed -n 2p
+          python - <<'PY'
+          import time
+          from faster_whisper import WhisperModel
+          t=time.time()
+          m=WhisperModel("small", device="cpu", compute_type="int8")
+          segs,info=m.transcribe("clip.wav")
+          print("TRANSCRIPT:", " ".join(s.text.strip() for s in segs))
+          print("lang", info.language, "seconds %.1f" % (time.time()-t))
+          PY
+  steel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: steel-browser container
+        run: |
+          docker run -d --name steel -p 3000:3000 ghcr.io/steel-dev/steel-browser:latest
+          for i in $(seq 1 40); do curl -sf localhost:3000/v1/health && break; sleep 3; done; echo
+          curl -s -X POST localhost:3000/v1/sessions -H 'content-type: application/json' -d '{}' | head -c 400; echo
+          docker stats --no-stream --format 'mem {{.MemUsage}}' steel
+          docker logs steel 2>&1 | tail -5
